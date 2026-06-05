@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>強制拜訪地圖 - 新店/文山/深坑</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'Noto Sans TC', sans-serif; display: flex; height: 100vh; flex-direction: column; }
+#map { flex: 1; }
+#sidebar { width: 100%; max-height: 45vh; overflow-y: auto; background: #f8f9fa; padding: 12px 16px; border-top: 2px solid #1a73e8; }
+h2 { font-size: 18px; margin-bottom: 8px; color: #333; }
+.street-group { margin-bottom: 10px; }
+.street-title { font-size: 14px; font-weight: 700; color: #1a73e8; padding: 4px 0; border-bottom: 1px solid #ddd; margin-bottom: 4px; }
+.customer { padding: 5px 8px; margin: 2px 0; border-radius: 6px; background: white; cursor: pointer; transition: 0.2s; border-left: 3px solid #1a73e8; font-size: 13px; }
+.customer:hover { background: #e8f0fe; }
+.customer .name { font-weight: 600; color: #333; }
+.customer .info { color: #666; font-size: 12px; margin-top: 1px; }
+.customer .phone { color: #0d7c3f; }
+.customer .no-phone { color: #999; }
+.customer .dist { color: #e67e22; font-size: 11px; }
+.locate-btn {
+  background: white; border: 2px solid #1a73e8; border-radius: 8px;
+  padding: 8px 14px; font-size: 14px; font-weight: 600; color: #1a73e8;
+  cursor: pointer; box-shadow: 0 1px 5px rgba(0,0,0,0.2);
+  margin-bottom: 8px; display: inline-block;
+}
+.locate-btn:hover { background: #e8f0fe; }
+.locate-btn.active { background: #1a73e8; color: white; }
+#toolbar { padding: 8px 16px 0; background: #f8f9fa; text-align: center; }
+.back-link { display: inline-block; margin: 8px 0; color: #1a73e8; text-decoration: none; font-size: 13px; font-weight: 600; }
+@media (min-width: 768px) {
+  body { flex-direction: row; }
+  #sidebar { width: 380px; max-height: 100vh; border-top: none; border-left: 2px solid #1a73e8; }
+  #toolbar { padding: 12px 16px; text-align: left; }
+}
+</style>
+</head>
+<body>
+
+<div id="map" style="flex:1;"></div>
+
+<div style="display:flex;flex-direction:column;flex-shrink:0;">
+<div id="toolbar">
+  <a class="back-link" href="/">⬅ 回所有區域</a>
+  <button class="locate-btn" id="locateBtn" onclick="locateMe()">📍 顯示我的位置</button>
+</div>
+<div id="sidebar">
+  <h2>📍 新店/文山/深坑 — 強制拜訪未認養</h2>
+  <p style="font-size:13px;color:#666;margin-bottom:8px;">共 3 家未認養，點選可開啟 Google Maps 導航</p>
+  <div id="customer-list"></div>
+</div>
+</div>
+
+<script>
+const districtColors = {"\u8208\u9686\u8def\u4e09\u6bb5": "#e74c3c", "\u8208\u9686\u8def\u56db\u6bb5": "#e74c3c", "\u5317\u65b0\u8def\u4e09\u6bb5": "#e74c3c", "\u5317\u6df1\u8def\u4e09\u6bb5": "#e74c3c"};
+
+const customers = [{"name": "俱巧思", "phone": "電話待補", "contact": "陳紫玉小姐", "addr": "116台北市文山區興隆路三段207巷11弄1號1樓", "lat": 24.99, "lng": 121.55}, {"name": "信邑", "phone": "電話待補", "contact": "黃若文小姐#16", "addr": "116台北市文山區興隆路四段179巷13號1樓", "lat": 24.99, "lng": 121.55}, {"name": "大坪林", "phone": "電話待補", "contact": "蔡金枝小姐", "addr": "231新北市新店區北新路三段200號15樓", "lat": 24.97, "lng": 121.54}];
+
+let userMarker = null;
+let userLocation = null;
+const customerMarkers = [];
+
+function calcDistance(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function formatDist(km) {
+  if (km < 1) return `${Math.round(km * 1000)}m`;
+  return `${km.toFixed(1)}km`;
+}
+
+function getStreet(addr) {
+  const allStreets = ["興隆路三段", "興隆路四段", "北新路三段", "北深路三段"];
+  for (const s of allStreets) {
+    if (addr.includes(s)) return s;
+  }
+  const m = addr.match(/([\u4e00-\u9fff]+路[\u4e00-\u9fff\d]*段?)/);
+  return m ? m[1] : null;
+}
+
+const groups = {};
+const streetOrder = [];
+for (const c of customers) {
+  const s = getStreet(c.addr) || '其他';
+  if (!groups[s]) { groups[s] = []; streetOrder.push(s); }
+  groups[s].push(c);
+}
+
+const map = L.map('map', { zoomControl: true }).setView([24.985, 121.56], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap',
+  maxZoom: 19
+}).addTo(map);
+
+function renderSidebar() {
+  let html = '';
+  for (const s of streetOrder) {
+    const color = districtColors[s] || '#1a73e8';
+    html += `<div class="street-group"><div class="street-title" style="color:${color}">🛣️ ${s}</div>`;
+    for (const c of groups[s]) {
+      const gmUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(c.addr)}`;
+      const phoneClass = c.phone.includes('待補') ? 'no-phone' : 'phone';
+      let distHtml = '';
+      if (userLocation && c.lat) {
+        const d = calcDistance(userLocation[0], userLocation[1], c.lat, c.lng);
+        distHtml = ` · <span class="dist">📏 ${formatDist(d)}</span>`;
+      }
+      html += `<div class="customer" onclick="window.open('${gmUrl}','_blank')">
+        <div class="name">${c.name}</div>
+        <div class="info">${c.contact} · <span class="${phoneClass}">📞 ${c.phone}</span>${distHtml}</div>
+        <div class="info" style="color:#888;font-size:11px;">${c.addr}</div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+  document.getElementById('customer-list').innerHTML = html;
+}
+
+const colorPalette = ['#e74c3c','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#34495e','#e91e63','#00bcd4','#ff5722','#795548','#607d8b'];
+let ci = 0;
+const usedColors = {};
+for (const s of streetOrder) {
+  if (!usedColors[s]) { usedColors[s] = colorPalette[ci % colorPalette.length]; ci++; }
+  const color = usedColors[s];
+  for (const c of groups[s]) {
+    if (!c.lat) continue;
+    const jitter = () => (Math.random() - 0.5) * 0.003;
+    const lat = c.lat + jitter();
+    const lng = c.lng + jitter();
+    c.lat = lat; c.lng = lng;
+    const gmUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(c.addr)}`;
+    const marker = L.circleMarker([lat, lng], {
+      radius: 8, color: color, fillColor: color, fillOpacity: 0.7, weight: 2
+    }).addTo(map);
+    marker.bindPopup(`<b>${c.name}</b><br>${c.contact}<br>${c.phone}<br><a href="${gmUrl}" target="_blank">🗺️ 導航</a>`);
+    customerMarkers.push(marker);
+  }
+}
+
+renderSidebar();
+
+function locateMe() {
+  const btn = document.getElementById('locateBtn');
+  if (userMarker) {
+    map.setView(userLocation, 14);
+    return;
+  }
+  btn.textContent = '📍 定位中...';
+  btn.disabled = true;
+  map.locate({ setView: false, enableHighAccuracy: true, timeout: 15000 });
+  map.once('locationfound', function(e) {
+    userLocation = [e.latitude, e.longitude];
+    userMarker = L.circleMarker(userLocation, {
+      radius: 12, color: '#1a73e8', fillColor: '#4285f4', fillOpacity: 0.8, weight: 3
+    }).addTo(map);
+    userMarker.bindPopup('<b>📍 你的位置</b>');
+    map.setView(userLocation, 14);
+    L.circle(userLocation, { radius: 1000, color: '#4285f4', fillColor: '#4285f4', fillOpacity: 0.08, weight: 1, dashArray: '5, 5' }).addTo(map);
+    btn.textContent = '📍 我的位置';
+    btn.classList.add('active');
+    btn.disabled = false;
+    renderSidebar();
+    const withDist = [];
+    for (const c of customers) {
+      if (c.lat) {
+        const d = calcDistance(userLocation[0], userLocation[1], c.lat, c.lng);
+        withDist.push({ ...c, dist: d });
+      }
+    }
+    withDist.sort((a, b) => a.dist - b.dist);
+    let nearHtml = '<div style="background:#e8f5e9;padding:8px 10px;border-radius:8px;margin-bottom:10px;font-size:13px;">';
+    nearHtml += '<b>🚶 離你最近</b><br>';
+    for (let i = 0; i < Math.min(3, withDist.length); i++) {
+      const c = withDist[i];
+      const gmUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(c.addr)}`;
+      nearHtml += `${i+1}. <a href="${gmUrl}" target="_blank" style="color:#2e7d32;text-decoration:none;font-weight:600;">${c.name}</a> (${formatDist(c.dist)})<br>`;
+    }
+    nearHtml += '</div>';
+    document.getElementById('customer-list').innerHTML = nearHtml + document.getElementById('customer-list').innerHTML;
+  });
+  map.once('locationerror', function(e) {
+    alert('無法取得你的位置：' + (e.message || '請確認已允許取用位置資訊'));
+    btn.textContent = '📍 顯示我的位置';
+    btn.disabled = false;
+  });
+}
+</script>
+</body>
+</html>
